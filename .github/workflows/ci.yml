@@ -1,3 +1,4 @@
+
 name: Node.js CI Pipeline
 
 on:
@@ -22,18 +23,18 @@ concurrency:
 
 jobs:
   build-and-test:
-    name: Build and Test
+    name: Build, Test and Push
     runs-on: ubuntu-latest
 
     env:
       DATABASE_URL: postgresql://devops:local_dev_password@localhost:5432/devops_db?schema=public
 
     steps:
-      # Step 1: Download repository code
+      # Step 1: Checkout
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      # Step 2: Install Node.js
+      # Step 2: Setup Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -48,14 +49,23 @@ jobs:
       - name: Generate Prisma Client
         run: npx prisma generate
 
-      # Step 5: Run automated tests
+      # Step 5: Run tests
       - name: Run tests
         run: npm test
 
-      # Step 6: Compile TypeScript
+      # Step 6: Build application
       - name: Build application
         run: npm run build
 
+      # Step 7: Build Docker image
+      - name: Build Docker image
+        run: docker build -t devops-api:${{ github.sha }} .
+
+      # Step 8: Verify Docker image
+      - name: Verify Docker image
+        run: docker images devops-api
+
+      # Step 9: Authenticate with AWS
       - name: Configure AWS credentials
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: aws-actions/configure-aws-credentials@v4
@@ -63,26 +73,35 @@ jobs:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
 
+      # Step 10: Verify AWS identity
       - name: Verify AWS identity
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: aws sts get-caller-identity
 
-      # Step 7: Build Docker image
-      - name: Build Docker image
-        run: |
-          docker build \
-            -t devops-api:${{ github.sha }} .
-
-      # Step 8: Show Docker image
-      - name: Verify Docker image
-        run: docker images devops-api
-
+      # Step 11: Login to ECR
       - name: Login to Amazon ECR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Step 12: Tag Docker image
+      - name: Tag Docker image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          aws ecr get-login-password --region ${{ vars.AWS_REGION }} | \
-            docker login \
-            --username AWS \
-            --password-stdin \
-            ${{ vars.ECR_REGISTRY }}
+          docker tag devops-api:$IMAGE_TAG \
+            $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
 
-
+      # Step 13: Push to ECR
+      - name: Push Docker image to ECR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker push \
+            $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
